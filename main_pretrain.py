@@ -178,6 +178,8 @@ def main(args):
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
         model_without_ddp = model.module
     
+    # import torchinfo
+    # torchinfo.summary(model,input_size=(1,3,224,224))
     # following timm: set wd as 0 for bias and norm layers
     # param_groups = optim_factory.add_weight_decay(model_without_ddp, args.weight_decay)
     optimizer = create_optimizer_v2(
@@ -192,6 +194,8 @@ def main(args):
     loss_scaler = NativeScaler()
 
     misc.load_model(args=args, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
+
+
 
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()

@@ -31,17 +31,20 @@ class LearnableMetaAutoencoderViT_v1(nn.Module):
 
         # --------------------------------------------------------------------------
         # MAE encoder specifics
-        self.patch_embed = PatchEmbed(img_size, patch_size, in_chans, embed_dim, flatten=False)
+        self.patch_embed = PatchEmbed(img_size, patch_size, in_chans, embed_dim, flatten=True)
         num_patches = self.patch_embed.num_patches
 
         # self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.meta_token = nn.Parameter(torch.zeros(1, meta_token_len, embed_dim))
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, embed_dim), requires_grad=False)  # fixed sin-cos embedding
         
+        attn_type = ["D2", "D2", "C"]
+        attn_type.extend(["S" for i in range(depth-3)])
         
+        print("attn_type:", attn_type)
         self.blocks = nn.ModuleList([
-            LeMeViTBlock(dim=embed_dim,num_heads=num_heads,attn_type="M",drop_path=0.1,mlp_ratio=mlp_ratio)
-            for i in range(depth)
+            LeMeViTBlock(dim=embed_dim,num_heads=num_heads,attn_type=attn,drop_path=0.1,mlp_ratio=mlp_ratio)
+            for attn in attn_type
         ])
 
         # self.blocks = nn.ModuleList([
@@ -172,15 +175,14 @@ class LearnableMetaAutoencoderViT_v1(nn.Module):
         # cls_tokens = cls_token.expand(x.shape[0], -1, -1)
         # x = torch.cat((cls_tokens, x), dim=1)
 
-        meta_token = self.meta_token
-        meta_tokens = meta_tokens.expand(x.shape[0], -1, -1)
+        meta_tokens = self.meta_token.expand(x.shape[0], -1, -1)
         c = meta_tokens
 
         # apply Transformer blocks
         for blk in self.blocks:
             x, c = blk(x, c)
         x = self.norm(x)
-        c = self.norm(c)
+        c = self.norm_c(c)
 
         return x, c
 
@@ -233,7 +235,7 @@ class LearnableMetaAutoencoderViT_v1(nn.Module):
 
         loss = (pred - target) ** 2
         loss = loss.mean(dim=-1)  # [N, L], mean loss per patch
-
+        loss = loss.mean()
         # loss = (loss * mask).sum() / mask.sum()  # mean loss on removed patches
         return loss
 

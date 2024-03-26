@@ -25,7 +25,7 @@ def train_one_epoch(model: torch.nn.Module,
                     args=None):
     model.train(True)
     metric_logger = misc.MetricLogger(delimiter="  ")
-    metric_logger.add_meter('lr', misc.SmoothedValue(window_size=1, fmt='{value:.6f}'))
+    metric_logger.add_meter('lr', misc.SmoothedValue(window_size=1, fmt='{value:.6e}'))
     header = 'Epoch: [{}]'.format(epoch)
     print_freq = 20
 
@@ -45,7 +45,7 @@ def train_one_epoch(model: torch.nn.Module,
         samples = samples.to(device, non_blocking=True)
 
         with torch.cuda.amp.autocast():
-            loss, _, _ = model(samples, mask_ratio=args.mask_ratio)
+            loss, _ = model(samples, mask_ratio=args.mask_ratio)
 
         loss_value = loss.item()
 

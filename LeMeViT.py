@@ -48,8 +48,8 @@ except ImportError:
     has_torchfunc = False
 
 
-has_flash_attn = False
-has_xformers = False
+# has_flash_attn = False
+# has_xformers = False
 
 def scaled_dot_product_attention(q, k, v, scale=None):
     """Custom Scaled-Dot Product Attention
@@ -348,8 +348,7 @@ class DualCrossAttention_v2(nn.Module):
         self.kv2 = nn.Linear(dim, 2 * dim)
         self.attn_drop = nn.Dropout(attn_drop)
 
-        self.proj_x = nn.Linear(dim, dim)
-        self.proj_c = nn.Linear(dim, dim)
+        self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
         self.attn_viz = nn.Identity() 
@@ -371,10 +370,10 @@ class DualCrossAttention_v2(nn.Module):
             
             x = flash_attn_func(q, k, v2, softmax_scale=scale_x)
             x = rearrange(x, "B N h d -> B N (h d)").contiguous()
-            x = self.proj_x(x)
+            x = self.proj(x)
             c = flash_attn_func(k, q, v1, softmax_scale=scale_c)
             c = rearrange(c, "B M h d -> B M (h d)").contiguous()
-            c = self.proj_c(c)
+            c = self.proj(c)
         elif self.use_xformers:
             qv1 = self.qv1(x)
             qv1 = rearrange(qv1, "B N (x h d) -> x B h N d", x=2, h=self.num_heads).contiguous()
@@ -386,10 +385,10 @@ class DualCrossAttention_v2(nn.Module):
             
             x = xops.memory_efficient_attention(q, k, v2, scale=scale_x)
             x = rearrange(x, "B h N d -> B N (h d)").contiguous()
-            x = self.proj_x(x)
+            x = self.proj(x)
             c = xops.memory_efficient_attention(k, q, v1, scale=scale_c)
             c = rearrange(c, "B h M d -> B M (h d)").contiguous()
-            c = self.proj_c(c)
+            c = self.proj(c)
         elif self.use_torchfunc:
             qv1 = self.qv1(x)
             qv1 = rearrange(qv1, "B N (x h d) -> x B h N d", x=2, h=self.num_heads).contiguous()
@@ -401,10 +400,10 @@ class DualCrossAttention_v2(nn.Module):
 
             x = F.scaled_dot_product_attention(q, k, v2, scale=scale_x)
             x = rearrange(x, "B h N d -> B N (h d)").contiguous()
-            x = self.proj_x(x)
+            x = self.proj(x)
             c = F.scaled_dot_product_attention(k, q, v1, scale=scale_c)
             c = rearrange(c, "B h M d -> B M (h d)").contiguous()
-            c = self.proj_c(c)
+            c = self.proj(c)
         else:
             qv1 = self.qv1(x)
             qv1 = rearrange(qv1, "B N (x h d) -> x B h N d", x=2, h=self.num_heads).contiguous()
@@ -422,7 +421,7 @@ class DualCrossAttention_v2(nn.Module):
             c = self.proj_c(c)
         return x, c
 
-class StemAttention(nn.Module):
+class CrossAttention(nn.Module):
     def __init__(
         self,
         dim,
@@ -501,7 +500,7 @@ class LeMeViTBlock(nn.Module):
     def __init__(self, dim, num_heads=8,
                  attn_drop = 0, proj_drop = 0, drop_path=0., attn_type=None,
                  layer_scale_init_value=-1,  qk_dim=None, mlp_ratio=4, mlp_dwconv=False,
-                 cpe_ks=3, pre_norm=True):
+                 cpe_ks=0, pre_norm=True):
         super().__init__()
         qk_dim = qk_dim or dim
 
@@ -513,14 +512,14 @@ class LeMeViTBlock(nn.Module):
         self.norm1 = nn.LayerNorm(dim, eps=1e-6) # important to avoid attention collapsing
         
         self.attn_type = attn_type
-        if attn_type == "M":
+        if attn_type == "D":
             self.attn = DualCrossAttention(dim=dim, num_heads=num_heads, attn_drop=attn_drop, proj_drop=proj_drop)
-        elif attn_type == "M2":
+        elif attn_type == "D2":
             self.attn = DualCrossAttention_v2(dim=dim, num_heads=num_heads, attn_drop=attn_drop, proj_drop=proj_drop)
         elif attn_type == "S" or attn_type == None:
             self.attn = StandardAttention(dim=dim, num_heads=num_heads, attn_drop=attn_drop, proj_drop=proj_drop)
-        elif attn_type == "STEM":
-            self.attn = StemAttention(dim=dim, num_heads=num_heads, attn_drop=attn_drop, proj_drop=proj_drop)
+        elif attn_type == "C":
+            self.attn = CrossAttention(dim=dim, num_heads=num_heads, attn_drop=attn_drop, proj_drop=proj_drop)
             
         self.norm2 = nn.LayerNorm(dim, eps=1e-6)
         self.mlp = nn.Sequential(nn.Linear(dim, int(mlp_ratio*dim)),
@@ -541,11 +540,11 @@ class LeMeViTBlock(nn.Module):
             
     def forward_with_xc(self, x, c):
 
-        _, C, H, W = x.shape
+        # _, C, H, W = x.shape
         # conv pos embedding
-        x = x + self.pos_embed(x)
+        # x = x + self.pos_embed(x)
         # permute to NHWC tensor for attention & mlp
-        x = rearrange(x, "N C H W -> N (H W) C")
+        # x = rearrange(x, "N C H W -> N (H W) C")
         # x = x.permute(0, 2, 3, 1) # (N, C, H, W) -> (N, H, W, C)
 
         # attention & mlp
@@ -576,19 +575,19 @@ class LeMeViTBlock(nn.Module):
                 c = self.norm1(c + self.drop_path(_c)) # (N, H, W, C)
                 c = self.norm2(c + self.drop_path(self.mlp(c))) # (N, H, W, C)
                 
-        x = rearrange(x, "N (H W) C -> N C H W",H=H,W=W)
+        # x = rearrange(x, "N (H W) C -> N C H W",H=H,W=W)
         # permute back
         # x = x.permute(0, 3, 1, 2) # (N, H, W, C) -> (N, C, H, W)
         return x, c
 
     def forward_with_c(self, x, c):
         
-        _, C, H, W = x.shape
+        # _, C, H, W = x.shape
         _x = x
         # conv pos embedding
-        x = x + self.pos_embed(x)
+        # x = x + self.pos_embed(x)
         # permute to NHWC tensor for attention & mlp
-        x = rearrange(x, "N C H W -> N (H W) C")
+        # x = rearrange(x, "N C H W -> N (H W) C")
         # x = x.permute(0, 2, 3, 1) # (N, C, H, W) -> (N, H, W, C)
 
         # attention & mlp
@@ -612,13 +611,13 @@ class LeMeViTBlock(nn.Module):
         # x = x.permute(0, 3, 1, 2) # (N, H, W, C) -> (N, C, H, W)
         return x, c
 
-    def forward_with_x(self, x, c):
+    def forward_with_x(self, c, x):
         
-        _, C, H, W = x.shape
+        # _, C, H, W = x.shape
         # conv pos embedding
-        x = x + self.pos_embed(x)
+        # x = x + self.pos_embed(x)
         # permute to NHWC tensor for attention & mlp
-        x = rearrange(x, "N C H W -> N (H W) C")
+        # x = rearrange(x, "N C H W -> N (H W) C")
         # x = x.permute(0, 2, 3, 1) # (N, C, H, W) -> (N, H, W, C)
 
         # attention & mlp
@@ -626,35 +625,27 @@ class LeMeViTBlock(nn.Module):
             if self.use_layer_scale:
                 x = x + self.drop_path(self.gamma1 * self.attn(self.norm1(x))) # (N, H, W, C)
                 x = x + self.drop_path(self.gamma2 * self.mlp(self.norm2(x))) # (N, H, W, C)
-                c = c + self.drop_path(self.gamma1 * self.attn(self.norm1(c))) # (N, H, W, C)
-                c = c + self.drop_path(self.gamma2 * self.mlp(self.norm2(c))) # (N, H, W, C)
             else:
                 x = x + self.drop_path(self.attn(self.norm1(x))) # (N, H, W, C)
                 x = x + self.drop_path(self.mlp(self.norm2(x))) # (N, H, W, C)
-                c = c + self.drop_path(self.attn(self.norm1(c))) # (N, H, W, C)
-                c = c + self.drop_path(self.mlp(self.norm2(c))) # (N, H, W, C)
         else: # https://kexue.fm/archives/9009
             if self.use_layer_scale:
                 x = self.norm1(x + self.drop_path(self.gamma1 * self.attn(x))) # (N, H, W, C)
                 x = self.norm2(x + self.drop_path(self.gamma2 * self.mlp(x))) # (N, H, W, C)
-                c = self.norm1(c + self.drop_path(self.gamma1 * self.attn(c))) # (N, H, W, C)
-                c = self.norm2(c + self.drop_path(self.gamma2 * self.mlp(c))) # (N, H, W, C)
             else:
                 x = self.norm1(x + self.drop_path(self.attn(x))) # (N, H, W, C)
                 x = self.norm2(x + self.drop_path(self.mlp(x))) # (N, H, W, C)
-                c = self.norm1(c + self.drop_path(self.attn(c))) # (N, H, W, C)
-                c = self.norm2(c + self.drop_path(self.mlp(c))) # (N, H, W, C)
-        x = rearrange(x, "N (H W) C -> N C H W",H=H,W=W)
+        # x = rearrange(x, "N (H W) C -> N C H W",H=H,W=W)
         # permute back
         # x = x.permute(0, 3, 1, 2) # (N, H, W, C) -> (N, C, H, W)
-        return x, c
+        return c, x
     
     def forward(self, x, c):
-        if self.attn_type == "M" or self.attn_type == "M2":
+        if self.attn_type == "D" or self.attn_type == "D2":
             return self.forward_with_xc(x,c)
         elif self.attn_type == "S":
             return self.forward_with_x(x,c)
-        elif self.attn_type == "STEM":
+        elif self.attn_type == "C":
             return self.forward_with_c(x,c)
 
 
