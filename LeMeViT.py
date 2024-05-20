@@ -48,8 +48,8 @@ except ImportError:
     has_torchfunc = False
 
 
-# has_flash_attn = False
-# has_xformers = False
+has_flash_attn = False
+has_xformers = False
 
 def scaled_dot_product_attention(q, k, v, scale=None):
     """Custom Scaled-Dot Product Attention
@@ -348,7 +348,8 @@ class DualCrossAttention_v2(nn.Module):
         self.kv2 = nn.Linear(dim, 2 * dim)
         self.attn_drop = nn.Dropout(attn_drop)
 
-        self.proj = nn.Linear(dim, dim)
+        self.proj_x = nn.Linear(dim, dim)
+        self.proj_c = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
         self.attn_viz = nn.Identity() 
@@ -370,10 +371,10 @@ class DualCrossAttention_v2(nn.Module):
             
             x = flash_attn_func(q, k, v2, softmax_scale=scale_x)
             x = rearrange(x, "B N h d -> B N (h d)").contiguous()
-            x = self.proj(x)
+            x = self.proj_x(x)
             c = flash_attn_func(k, q, v1, softmax_scale=scale_c)
             c = rearrange(c, "B M h d -> B M (h d)").contiguous()
-            c = self.proj(c)
+            c = self.proj_c(c)
         elif self.use_xformers:
             qv1 = self.qv1(x)
             qv1 = rearrange(qv1, "B N (x h d) -> x B h N d", x=2, h=self.num_heads).contiguous()
@@ -385,10 +386,10 @@ class DualCrossAttention_v2(nn.Module):
             
             x = xops.memory_efficient_attention(q, k, v2, scale=scale_x)
             x = rearrange(x, "B h N d -> B N (h d)").contiguous()
-            x = self.proj(x)
+            x = self.proj_x(x)
             c = xops.memory_efficient_attention(k, q, v1, scale=scale_c)
             c = rearrange(c, "B h M d -> B M (h d)").contiguous()
-            c = self.proj(c)
+            c = self.proj_c(c)
         elif self.use_torchfunc:
             qv1 = self.qv1(x)
             qv1 = rearrange(qv1, "B N (x h d) -> x B h N d", x=2, h=self.num_heads).contiguous()
@@ -400,10 +401,10 @@ class DualCrossAttention_v2(nn.Module):
 
             x = F.scaled_dot_product_attention(q, k, v2, scale=scale_x)
             x = rearrange(x, "B h N d -> B N (h d)").contiguous()
-            x = self.proj(x)
+            x = self.proj_x(x)
             c = F.scaled_dot_product_attention(k, q, v1, scale=scale_c)
             c = rearrange(c, "B h M d -> B M (h d)").contiguous()
-            c = self.proj(c)
+            c = self.proj_c(c)
         else:
             qv1 = self.qv1(x)
             qv1 = rearrange(qv1, "B N (x h d) -> x B h N d", x=2, h=self.num_heads).contiguous()
@@ -427,7 +428,7 @@ class CrossAttention(nn.Module):
         dim,
         num_heads,
         scale = None,
-        bias = True,
+        bias = False,
         attn_drop=0.0,
         proj_drop=0.0,
         **kwargs,
@@ -494,13 +495,13 @@ class CrossAttention(nn.Module):
             c = rearrange(c, "B h M d -> B M (h d)").contiguous()
             c = self.proj(c)
         return c
-    
 
-class LeMeViTBlock(nn.Module):
-    def __init__(self, dim, num_heads=8,
-                 attn_drop = 0, proj_drop = 0, drop_path=0., attn_type=None,
-                 layer_scale_init_value=-1,  qk_dim=None, mlp_ratio=4, mlp_dwconv=False,
-                 cpe_ks=0, pre_norm=True):
+
+class LeMeBlock(nn.Module):
+    def __init__(self, dim, 
+                 attn_drop, proj_drop, drop_path=0., attn_type=None,
+                 layer_scale_init_value=-1, num_heads=8, qk_dim=None, mlp_ratio=4, mlp_dwconv=False,
+                 cpe_ks=3, pre_norm=True):
         super().__init__()
         qk_dim = qk_dim or dim
 
@@ -611,7 +612,7 @@ class LeMeViTBlock(nn.Module):
         # x = x.permute(0, 3, 1, 2) # (N, H, W, C) -> (N, C, H, W)
         return x, c
 
-    def forward_with_x(self, c, x):
+    def forward_with_x(self, x, c):
         
         # _, C, H, W = x.shape
         # conv pos embedding
@@ -638,7 +639,7 @@ class LeMeViTBlock(nn.Module):
         # x = rearrange(x, "N (H W) C -> N C H W",H=H,W=W)
         # permute back
         # x = x.permute(0, 3, 1, 2) # (N, H, W, C) -> (N, C, H, W)
-        return c, x
+        return x, c
     
     def forward(self, x, c):
         if self.attn_type == "D" or self.attn_type == "D2":
@@ -647,8 +648,8 @@ class LeMeViTBlock(nn.Module):
             return self.forward_with_x(x,c)
         elif self.attn_type == "C":
             return self.forward_with_c(x,c)
-
-
+        else:
+            raise NotImplementedError("Attention type does not exit")
 
 
 class LeMeViT(nn.Module):
@@ -665,7 +666,7 @@ class LeMeViT(nn.Module):
                  attn_drop=0., 
                  drop_path_rate=0.,
                  # <<<------
-                 attn_type=["STEM","M","M","S","S"],
+                 attn_type=["C","D","D","S","S"],
                  queries_len=128,
                  qk_dims=None,
                  cpe_ks=3,
@@ -699,7 +700,7 @@ class LeMeViT(nn.Module):
         self.downsample_layers.append(stem)
 
         for i in range(self.num_stages-1):
-            if attn_type[i] == "STEM":
+            if attn_type[i] == "C":
                 downsample_layer = nn.Identity()
             else:
                 downsample_layer = nn.Sequential(
@@ -711,33 +712,30 @@ class LeMeViT(nn.Module):
             self.downsample_layers.append(downsample_layer)
         ##########################################################################
 
+
         #TODO: maybe remove last LN
         self.queries_len = queries_len
-        self.prototypes = nn.Parameter(torch.randn(self.queries_len ,embed_dim[0]), requires_grad=True) 
+        self.meta_tokens = nn.Parameter(torch.randn(self.queries_len ,embed_dim[0]), requires_grad=True) 
         
-        self.prototype_downsample = nn.ModuleList()
-        prototype_downsample = nn.Sequential(
+        self.meta_token_downsample = nn.ModuleList()
+        meta_token_downsample = nn.Sequential(
             nn.Linear(embed_dim[0], embed_dim[0] * 4),
             nn.LayerNorm(embed_dim[0] * 4),
             nn.GELU(),
             nn.Linear(embed_dim[0] * 4, embed_dim[0]),
             nn.LayerNorm(embed_dim[0])
         )
-        self.prototype_downsample.append(prototype_downsample)
+        self.meta_token_downsample.append(meta_token_downsample)
         for i in range(self.num_stages-1):
-            prototype_downsample = nn.Sequential(
+            meta_token_downsample = nn.Sequential(
                 nn.Linear(embed_dim[i], embed_dim[i] * 4),
                 nn.LayerNorm(embed_dim[i] * 4),
                 nn.GELU(),
                 nn.Linear(embed_dim[i] * 4, embed_dim[i+1]),
                 nn.LayerNorm(embed_dim[i+1])
             )
-            self.prototype_downsample.append(prototype_downsample)
+            self.meta_token_downsample.append(meta_token_downsample)
 
-        # self.prototype_stem = nn.ModuleList()
-        # for i in range(4):
-        #     prototype_stem = StemAttention(embed_dim[0], num_heads=2, bias=True)
-        #     self.prototype_stem.append(prototype_stem)
         
         self.stages = nn.ModuleList() # 4 feature resolution stages, each consisting of multiple residual blocks
         nheads= [dim // head_dim for dim in qk_dims]
@@ -745,7 +743,7 @@ class LeMeViT(nn.Module):
         cur = 0
         for i in range(self.num_stages):
             stage = nn.ModuleList(
-                [LeMeViTBlock(dim=embed_dim[i], 
+                [LeMeBlock(dim=embed_dim[i], 
                            attn_drop=attn_drop, proj_drop=drop_rate,
                            drop_path=dp_rates[cur + j],
                            attn_type=attn_type[i],
@@ -803,7 +801,7 @@ class LeMeViT(nn.Module):
     def forward_features(self, x, c):
         for i in range(self.num_stages): 
             x = self.downsample_layers[i](x)
-            c = self.prototype_downsample[i](c)
+            c = self.meta_token_downsample[i](c)
             for j, block in enumerate(self.stages[i]):
                 x, c = block(x, c)
         x = self.norm(x)
@@ -818,40 +816,33 @@ class LeMeViT(nn.Module):
 
         x = x.flatten(2).mean(-1)
         c = c.transpose(-2,-1).contiguous().mean(-1)
-        x = x
+        x = x + c
 
         return x
 
     def forward(self, x):
         B, _, H, W = x.shape 
-        c = self.prototypes.repeat(B,1,1)
+        c = self.meta_tokens.repeat(B,1,1)
         x = self.forward_features(x, c)
         x = self.head(x)
         return x
 
 
 
+
 #################### model variants #######################
 
 
-# model_urls = {
-#     "biformer_tiny_in1k": "https://api.onedrive.com/v1.0/shares/s!AkBbczdRlZvChHEOoGkgwgQzEDlM/root/content",
-#     "biformer_small_in1k": "https://api.onedrive.com/v1.0/shares/s!AkBbczdRlZvChHDyM-x9KWRBZ832/root/content",
-#     "biformer_base_in1k": "https://api.onedrive.com/v1.0/shares/s!AkBbczdRlZvChHI_XPhoadjaNxtO/root/content",
-# }
-
-
-# https://github.com/huggingface/pytorch-image-models/blob/4b8cfa6c0a355a9b3cb2a77298b240213fb3b921/timm/models/_factory.py#L93
 
 @register_model
 def lemevit_tiny(pretrained=False, pretrained_cfg=None,
                   pretrained_cfg_overlay=None, **kwargs):
     model = LeMeViT(
-        depth=[1, 2, 2, 7, 2],
+        depth=[1, 2, 2, 8, 2],
         embed_dim=[64, 64, 128, 192, 320], 
         head_dim=32,
         mlp_ratios=[4, 4, 4, 4, 4],
-        attn_type=["STEM","M","M","S","S"],
+        attn_type=["C","D","D","S","S"],
         queries_len=16,
         qkv_bias=True,
         qk_scale=None,
@@ -865,8 +856,134 @@ def lemevit_tiny(pretrained=False, pretrained_cfg=None,
         use_checkpoint_stages=[],
         **kwargs)
     model.default_cfg = _cfg()
-    
+
+    if pretrained:
+        checkpoint = torch.load(pretrained, map_location="cpu", check_hash=True)
+        model.load_state_dict(checkpoint["model"])
+
     return model
+
+
+@register_model
+def lemevit_small(pretrained=False, pretrained_cfg=None,
+                  pretrained_cfg_overlay=None, **kwargs):
+    model = LeMeViT(
+        depth=[1, 2, 2, 6, 2],
+        embed_dim=[96, 96, 192, 320, 384], 
+        head_dim=32,
+        mlp_ratios=[4, 4, 4, 4, 4],
+        attn_type=["C","D","D","S","S"],
+        queries_len=16,
+        qkv_bias=True,
+        qk_scale=None,
+        attn_drop=0.,
+        qk_dims=None,
+        cpe_ks=3,
+        pre_norm=True,
+        mlp_dwconv=False,
+        representation_size=None,
+        layer_scale_init_value=-1,
+        use_checkpoint_stages=[],
+        **kwargs)
+    model.default_cfg = _cfg()
+
+    if pretrained:
+        checkpoint = torch.load(pretrained, map_location="cpu", check_hash=True)
+        model.load_state_dict(checkpoint["model"])
+
+    return model
+
+
+@register_model
+def lemevit_base(pretrained=False, pretrained_cfg=None,
+                  pretrained_cfg_overlay=None, **kwargs):
+    model = LeMeViT(
+        depth=[2, 4, 4, 18, 4],
+        embed_dim=[96, 96, 192, 384, 512], 
+        head_dim=32,
+        mlp_ratios=[4, 4, 4, 4, 4],
+        attn_type=["C","D","D","S","S"],
+        queries_len=16,
+        qkv_bias=True,
+        qk_scale=None,
+        attn_drop=0.,
+        qk_dims=None,
+        cpe_ks=3,
+        pre_norm=True,
+        mlp_dwconv=False,
+        representation_size=None,
+        layer_scale_init_value=-1,
+        use_checkpoint_stages=[],
+        **kwargs)
+    model.default_cfg = _cfg()
+
+    if pretrained:
+        checkpoint = torch.load(pretrained, map_location="cpu", check_hash=True)
+        model.load_state_dict(checkpoint["model"])
+
+    return model
+
+
+@register_model
+def lemevit_small_v2(pretrained=False, pretrained_cfg=None,
+                  pretrained_cfg_overlay=None, **kwargs):
+    model = LeMeViT(
+        depth=[1, 2, 2, 8, 2],
+        embed_dim=[64, 64, 128, 256, 512], 
+        head_dim=32,
+        mlp_ratios=[3, 3, 3, 3, 3],
+        attn_type=["C","D","D","S","S"], 
+        queries_len=16,
+        qkv_bias=True,
+        qk_scale=None,
+        attn_drop=0.,
+        qk_dims=None,
+        cpe_ks=3,
+        pre_norm=True,
+        mlp_dwconv=False,
+        representation_size=None,
+        layer_scale_init_value=-1,
+        use_checkpoint_stages=[],
+        **kwargs)
+    model.default_cfg = _cfg()
+
+    if pretrained:
+        checkpoint = torch.load(pretrained, map_location="cpu", check_hash=True)
+        model.load_state_dict(checkpoint["model"])
+
+    return model
+
+
+@register_model
+def lemevit_tiny_v2(pretrained=False, pretrained_cfg=None,
+                  pretrained_cfg_overlay=None, **kwargs):
+    model = LeMeViT(
+        depth=[2, 2, 2, 4, 2],
+        embed_dim=[96, 96, 192, 320, 384],
+        head_dim=32,
+        mlp_ratios=[4, 4, 4, 4, 4],
+        attn_type=["C","D2","D2","S","S"],
+        queries_len=16,
+        qkv_bias=True,
+        qk_scale=None,
+        attn_drop=0.,
+        qk_dims=None,
+        cpe_ks=3,
+        pre_norm=True,
+        mlp_dwconv=False,
+        representation_size=None,
+        layer_scale_init_value=-1,
+        use_checkpoint_stages=[],
+        **kwargs)
+    model.default_cfg = _cfg()
+
+    if pretrained:
+        checkpoint = torch.load(pretrained, map_location="cpu", check_hash=True)
+        model.load_state_dict(checkpoint["model"])
+
+    return model
+
+
 
 @register_model
 def vit_tiny(pretrained=False, pretrained_cfg=None,
@@ -891,122 +1008,8 @@ def vit_tiny(pretrained=False, pretrained_cfg=None,
         **kwargs)
     model.default_cfg = _cfg()
 
-    return model
-
-@register_model
-def lemevit_small(pretrained=False, pretrained_cfg=None,
-                  pretrained_cfg_overlay=None, **kwargs):
-    model = LeMeViT(
-        depth=[1, 2, 2, 6, 2],
-        embed_dim=[96, 96, 192, 320, 384], 
-        head_dim=32,
-        mlp_ratios=[4, 4, 4, 4, 4],
-        attn_type=["STEM","M","M","S","S"],
-        queries_len=16,
-        qkv_bias=True,
-        qk_scale=None,
-        attn_drop=0.,
-        qk_dims=None,
-        cpe_ks=3,
-        pre_norm=True,
-        mlp_dwconv=False,
-        representation_size=None,
-        layer_scale_init_value=-1,
-        use_checkpoint_stages=[],
-        **kwargs)
-    model.default_cfg = _cfg()
-
-    # if pretrained:
-    #     model_key = 'biformer_tiny_in1k'
-    #     url = model_urls[model_key]
-    #     checkpoint = torch.hub.load_state_dict_from_url(url=url, map_location="cpu", check_hash=True, file_name=f"{model_key}.pth")
-    #     model.load_state_dict(checkpoint["model"])
-
-    return model
-
-@register_model
-def lemevit_small_v2(pretrained=False, pretrained_cfg=None,
-                  pretrained_cfg_overlay=None, **kwargs):
-    model = LeMeViT(
-        depth=[1, 2, 2, 8, 2],
-        embed_dim=[64, 64, 128, 256, 512], 
-        head_dim=32,
-        mlp_ratios=[3, 3, 3, 3, 3],
-        attn_type=["STEM","S","S","S","S"], 
-        queries_len=256,
-        qkv_bias=True,
-        qk_scale=None,
-        attn_drop=0.,
-        qk_dims=None,
-        cpe_ks=3,
-        pre_norm=True,
-        mlp_dwconv=False,
-        representation_size=None,
-        layer_scale_init_value=-1,
-        use_checkpoint_stages=[],
-        **kwargs)
-    model.default_cfg = _cfg()
-
-    # if pretrained:
-    #     model_key = 'biformer_tiny_in1k'
-    #     url = model_urls[model_key]
-    #     checkpoint = torch.hub.load_state_dict_from_url(url=url, map_location="cpu", check_hash=True, file_name=f"{model_key}.pth")
-    #     model.load_state_dict(checkpoint["model"])
-
-    return model
-
-
-@register_model
-def lemevit_tiny_v2(pretrained=False, pretrained_cfg=None,
-                  pretrained_cfg_overlay=None, **kwargs):
-    model = LeMeViT(
-        depth=[2, 2, 2, 4, 2],
-        embed_dim=[96, 96, 192, 320, 384],
-        head_dim=32,
-        mlp_ratios=[4, 4, 4, 4, 4],
-        attn_type=["STEM","M2","M2","S","S"],
-        queries_len=16,
-        qkv_bias=True,
-        qk_scale=None,
-        attn_drop=0.,
-        qk_dims=None,
-        cpe_ks=3,
-        pre_norm=True,
-        mlp_dwconv=False,
-        representation_size=None,
-        layer_scale_init_value=-1,
-        use_checkpoint_stages=[],
-        **kwargs)
-    model.default_cfg = _cfg()
-    return model
-
-@register_model
-def lemevit_base(pretrained=False, pretrained_cfg=None,
-                  pretrained_cfg_overlay=None, **kwargs):
-    model = LeMeViT(
-        depth=[2, 4, 4, 18, 4],
-        embed_dim=[96, 96, 192, 384, 512], 
-        head_dim=32,
-        mlp_ratios=[4, 4, 4, 4, 4],
-        attn_type=["STEM","M","M","S","S"],
-        queries_len=16,
-        qkv_bias=True,
-        qk_scale=None,
-        attn_drop=0.,
-        qk_dims=None,
-        cpe_ks=3,
-        pre_norm=True,
-        mlp_dwconv=False,
-        representation_size=None,
-        layer_scale_init_value=-1,
-        use_checkpoint_stages=[],
-        **kwargs)
-    model.default_cfg = _cfg()
-
-    # if pretrained:
-    #     model_key = 'biformer_tiny_in1k'
-    #     url = model_urls[model_key]
-    #     checkpoint = torch.hub.load_state_dict_from_url(url=url, map_location="cpu", check_hash=True, file_name=f"{model_key}.pth")
-    #     model.load_state_dict(checkpoint["model"])
+    if pretrained:
+        checkpoint = torch.load(pretrained, map_location="cpu", check_hash=True)
+        model.load_state_dict(checkpoint["model"])
 
     return model

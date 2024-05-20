@@ -87,7 +87,7 @@ class LeMeViT_Plain(nn.Module):
         ##########################################################################
 
 
-        attn_type = ["D2", "D2", "C"]
+        attn_type = ["C", "C", "D2", "D2", "C"]
         attn_type.extend(["S" for i in range(depth-3)])
 
         #TODO: maybe remove last LN

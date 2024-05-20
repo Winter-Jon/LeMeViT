@@ -38,7 +38,7 @@ class LearnableMetaAutoencoderViT_v1(nn.Module):
         self.meta_token = nn.Parameter(torch.zeros(1, meta_token_len, embed_dim))
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, embed_dim), requires_grad=False)  # fixed sin-cos embedding
         
-        attn_type = ["D2", "D2", "C"]
+        attn_type = ["C", "C", "D2", "D2", "C"]
         attn_type.extend(["S" for i in range(depth-3)])
         
         print("attn_type:", attn_type)
@@ -90,7 +90,7 @@ class LearnableMetaAutoencoderViT_v1(nn.Module):
         # timm's trunc_normal_(std=.02) is effectively normal_(std=0.02) as cutoff is too big (2.)
         # torch.nn.init.normal_(self.cls_token, std=.02)
         torch.nn.init.normal_(self.mask_token, std=.02)
-        torch.nn.init.normal_(self.meta_token, std=.02)
+        torch.nn.init.kaiming_normal_(self.meta_token)
 
         # initialize nn.Linear and nn.LayerNorm
         self.apply(self._init_weights)
